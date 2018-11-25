@@ -28,6 +28,13 @@ translateToBits(byte b, std::vector<bool> &k) { //перевод последо�
     }
 }
 
+void
+translateCodeSize(byte b, std::vector<bool> &k) { //перевод последовательности байт в последовательность нулей и единиц
+    for (int i = sizeof(b) * 8 - 4; i >= 0; --i) {
+        k.push_back((b >> i) & 1);
+    }
+}
+
 void translateToBytes(std::vector<bool> &k,
                       IOutputStream &compressed) { //перевод последовательности из нулей и единиц в байтовое представление
     byte a = 0;
@@ -43,26 +50,50 @@ void translateToBytes(std::vector<bool> &k,
             a = 0;
         }
     }
-
 }
 
-void preOrder(Node *node, std::vector<bool> *codes, std::vector<bool> &k,
-              IOutputStream &compressed) { //обход дерева Хаффмана в глубину
+byte getByte(std::vector<bool> k, int iter) {
+    byte a = 0;
+    for (int i = 0; i < 8; i++) {
+        a += k[i + iter] * (int) pow(2, 7 - i % 8);
+    }
+    return (byte) a;
+}
+
+void coutVector(std::vector<bool> v) {
+    for (int i = 0; i < v.size(); i++) {
+        if (!v.empty()) {
+            std::cout << v[i];
+        }
+    }
+}
+
+byte getCodeSize(std::vector<bool> k, int iter) {
+    byte a = 0;
+    for (int i = 0; i < 5; i++) {
+        a += k[i + iter] * (int) pow(2, 7 - i % 8);
+    }
+    return (byte) a >> 3;
+}
+
+void preOrder(Node *node, std::vector<std::vector<bool>> &codes, std::vector<bool> &k,
+              std::vector<bool> &compressedVector) { //обход дерева Хаффмана в глубину
     if (!node) {
         return;
     }
     if (node->left == nullptr && node->right == nullptr) {
         codes[node->data] = k;
-        compressed.Write(node->data); //Добавляем в сжатый документ символ
-        compressed.Write((byte) (k.size())); //Добавляем в сжатый документ зазор шифра, т е количество значимых бит
-        translateToBytes(k, compressed); //Добавляем в сжатый документ шифр символа
+        translateToBits(node->data, compressedVector); //Добавляем в сжатый документ символ
+        translateCodeSize((byte) (k.size()),
+                          compressedVector); //Добавляем в сжатый документ зазор шифра, т е количество значимых бит
+        addVector(compressedVector, k); //Добавляем в сжатый документ шифр символа
         return;
     }
     k.push_back(0);
-    preOrder(node->left, codes, k, compressed);
+    preOrder(node->left, codes, k, compressedVector);
     k.pop_back();
     k.push_back(1);
-    preOrder(node->right, codes, k, compressed);
+    preOrder(node->right, codes, k, compressedVector);
     k.pop_back();
 }
 
@@ -92,7 +123,9 @@ void Encode(IInputStream &original, IOutputStream &compressed) {
     std::vector<byte> data; //хранит документ по байтам
     byte b = 0;
     int freq[256]; //частота встреч различных символов
-    auto *codes = new std::vector<bool>[256]; //хранит шифры для каждого символа (Шифр для символа k хранится в ячейке codes[(int)k])
+    std::vector<std::vector<bool>> codes(256,
+                                         std::vector<bool>()); //хранит шифры для каждого символа (Шифр для символа k хранится в ячейке codes[(int)k])
+
     for (int i = 0; i < 256; i++) {
         freq[i] = 0;
     }
@@ -129,16 +162,17 @@ void Encode(IInputStream &original, IOutputStream &compressed) {
     }
     Node *haffTree = trees[0].second; //дерево шифров в алгоритме Хаффмана
 
+    std::vector<bool> compressedVector; //массив, хранящий последовательность 0 и 1, соответствующую зашифрованному документу
     std::vector<bool> k;
     preOrder(haffTree, codes, k,
-             compressed); //Проходимся по дереву, запоминая шифр для каждого символа (+добавляем в начало сжатого документа пары символ + шифр)
+             compressedVector); //Проходимся по дереву, запоминая шифр для каждого символа (+добавляем в начало сжатого документа пары символ + шифр)
 
-    std::vector<bool> compressedVector; //массив, хранящий последовательность 0 и 1, соответствующую зашифрованному документу
     for (int i = 0; i < data.size(); i++) {
         addVector(compressedVector, codes[data[i]]);
     }
     compressed.Write((byte) (compressedVector.size() %
-                             8)); //добавляем после пар символ + шифр зазор, т е  количество значимых бит в последнем байте
+                             8)); //добавляем зазор, т е  количество значимых бит в последнем байте
+
     translateToBytes(compressedVector, compressed); //переводим compressedVector в байтовое представление
 }
 
@@ -149,39 +183,19 @@ void Decode(IInputStream &compressed, IOutputStream &original) {
     int numberOfSymbols = b; //количество различных символов, использующихся в документе
     int cnt = 0; //количество считанных пар символ + шифр
     int index = 0; //хранит числовую интерпретацию символа, то есть индекс в таблице символов и шифров
-    std::vector<bool> table[256]; //таблица, хранящая пары символ + шифр(Шифр для символа k хранится в ячейке table[(int)k])
-    std::vector<bool> k;
+    std::vector<std::vector<bool>> table(256,
+                                         std::vector<bool>());//таблица, хранящая пары символ + шифр(Шифр для символа k хранится в ячейке table[(int)k])
     std::vector<byte> data;
+
+    compressed.extraRead(b);
+    int gap = (8 - (int) b) % 8; //считываем зазор
 
     while (compressed.extraRead(b)) { //считываем зашифрованный документ
         data.push_back(b);
     }
 
-    int iter = 0; //итератор для прохода по массиву data
-    int codeLength = 0; //длина шифра для символа
-    while (cnt < numberOfSymbols) { //Заполняем таблицу, считывая символы и их шифры
-        index = (int) data[iter];
-        ++iter;
-        codeLength = (int) data[iter];
-        ++iter;
-        while (codeLength > 0) {
-            translateToBits(data[iter], k);
-            ++iter;
-            addVector(table[index], k);
-            k.clear();
-            codeLength -= 8;
-        }
-        for (int i = 0; i < -codeLength; i++) {
-            table[index].pop_back(); //удаление ничего не значащих бит из шифра
-        }
-        cnt++;
-    }
-
-    int gap = (8 - (int) data[iter]) % 8; //считываем зазор
-    ++iter;
-
     std::vector<bool> bitseq;
-    for (int i = iter; i < data.size(); i++) { //переводим документ в последовательность 0 и 1
+    for (int i = 0; i < data.size(); i++) { //переводим документ в последовательность 0 и 1
         translateToBits(data[i], bitseq);
     }
 
@@ -189,14 +203,29 @@ void Decode(IInputStream &compressed, IOutputStream &original) {
         bitseq.pop_back();
     }
 
+    int iter = 0; //итератор для прохода по массиву bitseq
+    int codeLength = 0; //длина шифра для символа
+    while (cnt < numberOfSymbols) { //Заполняем таблицу, считывая символы и их шифры
+        index = getByte(bitseq, iter);
+        iter += 8;
+        codeLength = getCodeSize(bitseq, iter);
+        iter += 5;
+        while (codeLength > 0) {
+            table[index].push_back(bitseq[iter]);
+            ++iter;
+            --codeLength;
+        }
+        cnt++;
+    }
+
     std::vector<bool> symbol;
-    for (int i = 0; i < bitseq.size(); i++) { //расшифровываем последовательность 0 и 1
+    for (int i = iter; i < bitseq.size(); i++) { //расшифровываем последовательность 0 и 1
         symbol.push_back(bitseq[i]);
         for (int j = 0; j < 256; j++) {
             if (symbol == table[j]) {
                 original.Write((byte) j);
                 symbol.clear();
-                break;
+                 break;
             }
         }
     }
